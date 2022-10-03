@@ -12,9 +12,10 @@
 
 """The hyper-cubic lattice"""
 from dataclasses import asdict
-from itertools import product
+from email.mime import base
+from itertools import chain, product, combinations
 from math import pi
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, AbstractSet
 
 import numpy as np
 from retworkx import PyGraph
@@ -57,6 +58,7 @@ class HyperCubicLattice(Lattice):
         boundary_condition: Union[
             BoundaryCondition, Tuple[BoundaryCondition, ...]
         ] = BoundaryCondition.OPEN,
+        self_loops: bool = True,
     ) -> None:
         """
         Args:
@@ -82,6 +84,8 @@ class HyperCubicLattice(Lattice):
 
         self._dim = len(size)
         self._size = size
+        self._base = [np.prod(self._size[:i], dtype=int) for i in range(self.dim + 1)]
+        self.directions = {self._base[i]: i + 1 for i in range(self.dim)}
 
         # edge parameter
         if isinstance(edge_parameter, (int, float, complex)):
@@ -119,8 +123,9 @@ class HyperCubicLattice(Lattice):
         graph.add_edges_from(bulk_edge_list)
 
         # add self-loops.
-        self_loop_list = self._self_loops()
-        graph.add_edges_from(self_loop_list)
+        if self_loops:
+            self_loop_list = self._self_loops()
+            graph.add_edges_from(self_loop_list)
 
         # add edges that cross the boundaries
         boundary_edge_list = self._create_boundary_edges()
@@ -179,6 +184,98 @@ class HyperCubicLattice(Lattice):
         """
         return self._boundary_condition
 
+    def direction(self, edge: tuple[int, int]) -> int | None:
+        """Returns the direction of a given edge.
+
+        1,2,3 correspond to x,y,z directions respectively (generalizes to arbitrary dimensions).
+        A positive or negative sign indicates the sense of the vector going from the first node
+        to the second. In case that there is no edge between the two nodes, `None` will be returned.
+        Args:
+            edge: A tuple with the first and the second node that form a given edge.
+
+        """
+        if not self.graph.has_edge(edge[0], edge[1]):
+            return None
+
+        diff = self._index_to_coordinate(edge[1]) - self._index_to_coordinate(edge[0])
+        directn = diff.nonzero()[0][0]
+        if np.abs(diff[directn]) == 1:
+            return np.sign(diff[directn]) * (directn + 1)
+        else:
+            return -np.sign(diff[directn]) * (directn + 1)
+
+    def belongs_to_face(self, node: int) -> AbstractSet[int]:
+        """For a given node, returns a set of the faces that the node belongs to.
+
+        0 and 1 correspond to the leftmost and rightmost faces in the x direction, 2 and 3 correspond
+        to the faces in the y direction and so on.
+
+        Args:
+            node: Index of the node.
+        """
+        faces = set()
+        for f in range(self.dim):
+            if node % self._prod_dim[f + 1] < self._prod_dim[f]:
+                faces.add(2 * f)
+            if node % self._prod_dim[f + 1] >= self._prod_dim[f + 1] - self._prod_dim[f]:
+                faces.add(2 * f + 1)
+
+        return faces
+
+    def indexed_graph(self):
+        """Auxiliary function that returns an identical graph with edge indices as edge_parameters."""
+        graph_indexed = self.graph
+        for index in graph_indexed.edge_indices():
+            graph_indexed.update_edge_by_index(index, index)
+        return graph_indexed
+
+    def base_connections(self):
+        """Returns a list with all the possible numbers that the index of a given node
+        to a neighbouring node.
+        """
+        base_connections = []
+        for i in range(self.dim):
+            if self.boundary_condition[i] == BoundaryCondition.PERIODIC:
+                base_connections.append((self._base[i], self._base[i + 1] - self._base[i]))
+            else:
+                base_connections.append((self._base[i],))
+        return base_connections
+
+    def get_plaquettes(self):
+        """Returns a list of lists with the indices of the edges that form a plaquette.
+        Only works for 2D and 3D lattices
+        """
+
+        graph_indexed = self.indexed_graph()
+
+        generator = lambda node, base_a, base_b: [
+            (node, node + base_a),
+            (node + base_a, node + base_a + base_b),
+            (node + base_a + base_b, node + base_b),
+            (node + base_b, node),
+        ]
+
+        base_connections = self.base_connections()
+
+        plaq_dir = [product(*dir) for dir in combinations(base_connections, 2)]
+
+        plaq_dir = chain.from_iterable(plaq_dir)
+
+        plaquettes = set()
+        for base_a, base_b in plaq_dir:
+            for node in self.node_indexes:
+                plaq_gen = generator(node, base_a, base_b)
+                plaquette_exists = all(
+                    [graph_indexed.has_edge(*nodes_edge) for nodes_edge in plaq_gen]
+                )
+                if plaquette_exists:
+                    plaquette = tuple(
+                        graph_indexed.get_edge_data(*nodes_edge) for nodes_edge in plaq_gen
+                    )
+                    plaquettes.add(plaquette)
+
+        return plaquettes
+
     def _coordinate_to_index(self, coord: np.ndarray) -> int:
         """Convert the coordinate of a lattice point to an integer for labeling.
             When size=(l0, l1, l2, ...), then a coordinate (x0, x1, x2, ...) is converted as
@@ -190,10 +287,24 @@ class HyperCubicLattice(Lattice):
             Return x0 + x1*l0 + x2*l0*l1 + ...
             when coord=np.array([x0, x1, x2...]) and size=(l0, l1, l2, ...).
         """
-        size = self._size
-        dim = len(size)
-        base = np.array([np.prod(size[:i]) for i in range(dim)], dtype=int)
-        return np.dot(coord, base).item()
+
+        return np.dot(coord, self._base[:-1]).item()
+
+    def _index_to_coordinate(self, index: int) -> np.ndarray | None:
+        """Converts index into coordinates in the lattice.
+        Returns `None` if the index is outside of the lattice.
+
+        Args:
+            index: index of the node
+        """
+        if index >= self._base[-1]:
+            return None
+        coord = np.empty(self.dim, dtype=int)
+        for d, b in enumerate(self._base[-2::-1]):
+            coeff = int(index // b)
+            coord[-d - 1] = coeff
+            index -= coeff * b
+        return coord
 
     def _self_loops(self) -> List[Tuple[int, int, complex]]:
         """Return a list consisting of the self-loops on all the nodes.

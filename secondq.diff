@@ -1,0 +1,159 @@
+diff --git a/qiskit_nature/second_q/mappers/qubit_converter.py b/qiskit_nature/second_q/mappers/qubit_converter.py
+index 9713e850..6b717318 100644
+--- a/qiskit_nature/second_q/mappers/qubit_converter.py
++++ b/qiskit_nature/second_q/mappers/qubit_converter.py
+@@ -28,7 +28,7 @@ from typing import (
+     Tuple,
+     TypeVar,
+     Union,
+-    Sequence
++    Sequence,
+ )
+ 
+ import numpy as np
+@@ -215,8 +215,8 @@ class QubitConverter:
+         self,
+         second_q_op: SecondQuantizedOp,
+         num_particles: Optional[list[Tuple[int, int]]] = None,
+-        sector_locator: Optional[list[
+-            Callable[[Z2Symmetries, "QubitConverter"], Optional[List[int]]]]
++        sector_locator: Optional[
++            list[Callable[[Z2Symmetries, "QubitConverter"], Optional[List[int]]]]
+         ] = None,
+     ) -> PauliSumOp:
+         """
+@@ -459,7 +459,9 @@ class QubitConverter:
+             if isinstance(self._mappers, list) and len(self._mappers) > 1:
+                 return self._map_multiple(second_q_op)
+             else:
+-                raise TypeError("The conversion of MixedOp requires at least a fermionic and spin mapper.")
++                raise TypeError(
++                    "The conversion of MixedOp requires at least a fermionic and spin mapper."
++                )
+ 
+         else:
+             if isinstance(self._mappers, list):
+@@ -488,7 +490,9 @@ class QubitConverter:
+         max_f_reg_length = 0
+         for f_op in operators[FermionicOp]:
+             q_op = apply_map_sym(f_op, fermionic_mapper)
+-            max_f_reg_length = q_op.num_qubits if q_op.num_qubits > max_f_reg_length else max_f_reg_length
++            max_f_reg_length = (
++                q_op.num_qubits if q_op.num_qubits > max_f_reg_length else max_f_reg_length
++            )
+             qubit_f_ops.append(q_op)
+ 
+         # convert all spins and store in list
+@@ -496,7 +500,9 @@ class QubitConverter:
+         max_s_reg_length = 0
+         for s_op in operators[SpinOp]:
+             q_op = apply_map_sym(s_op, spin_mapper)
+-            max_s_reg_length = q_op.num_qubits if q_op.num_qubits > max_s_reg_length else max_s_reg_length
++            max_s_reg_length = (
++                q_op.num_qubits if q_op.num_qubits > max_s_reg_length else max_s_reg_length
++            )
+             qubit_s_ops.append(q_op)
+ 
+         f_paulis = I if max_f_reg_length > 0 else None
+diff --git a/qiskit_nature/second_q/operators/__init__.py b/qiskit_nature/second_q/operators/__init__.py
+index f7f38d0e..20ef242a 100644
+--- a/qiskit_nature/second_q/operators/__init__.py
++++ b/qiskit_nature/second_q/operators/__init__.py
+@@ -34,10 +34,4 @@ from .spin_op import SpinOp
+ from .vibrational_op import VibrationalOp
+ from .mixed_op import MixedOp
+ 
+-__all__ = [
+-    "FermionicOp",
+-    "SecondQuantizedOp",
+-    "SpinOp",
+-    "VibrationalOp",
+-    "MixedOp"
+-]
++__all__ = ["FermionicOp", "SecondQuantizedOp", "SpinOp", "VibrationalOp", "MixedOp"]
+diff --git a/qiskit_nature/second_q/operators/fermionic_op.py b/qiskit_nature/second_q/operators/fermionic_op.py
+index 4c8d70ab..b9f4bb8c 100644
+--- a/qiskit_nature/second_q/operators/fermionic_op.py
++++ b/qiskit_nature/second_q/operators/fermionic_op.py
+@@ -413,6 +413,7 @@ class FermionicOp(SecondQuantizedOp):
+     def compose(self, other: FermionicOp) -> FermionicOp:
+         if not isinstance(other, FermionicOp):
+             from .mixed_op import MixedOp
++
+             return MixedOp(([self, other], 1))
+             # else:
+             #     raise TypeError(
+diff --git a/qiskit_nature/second_q/operators/mixed_op.py b/qiskit_nature/second_q/operators/mixed_op.py
+index cac31a76..c5e97f1a 100644
+--- a/qiskit_nature/second_q/operators/mixed_op.py
++++ b/qiskit_nature/second_q/operators/mixed_op.py
+@@ -8,8 +8,8 @@ from typing import cast
+ from copy import copy
+ import numpy as np
+ 
+-class MixedOp(SecondQuantizedOp):
+ 
++class MixedOp(SecondQuantizedOp):
+     def _assign_data(self, op):
+         if isinstance(op, FermionicOp) or isinstance(op, SpinOp):
+             if type(op) in self.ops:
+@@ -21,9 +21,12 @@ class MixedOp(SecondQuantizedOp):
+ 
+     def __init__(
+         self,
+-        data: SecondQuantizedOp | list[SecondQuantizedOp] |
+-               tuple[SecondQuantizedOp | list[SecondQuantizedOp],
+-                     float | complex | list[tuple[list[tuple[type(SecondQuantizedOp), int]], complex]]
++        data: SecondQuantizedOp
++        | list[SecondQuantizedOp]
++        | tuple[
++            SecondQuantizedOp | list[SecondQuantizedOp],
++            float | complex | list[tuple[list[tuple[type(SecondQuantizedOp), int]], complex]],
++        ],
+     ):
+ 
+         # VibrationalOp is currently not supported
+@@ -46,9 +49,11 @@ class MixedOp(SecondQuantizedOp):
+             self._assign_data(op_list)
+ 
+         if not isinstance(data[1], list):
+-            self.coeffs = [([(FermionicOp, f_index), (SpinOp, s_index)], coeff)
+-                           for f_index in range(len(self.ops[FermionicOp]))
+-                           for s_index in range(len(self.ops[SpinOp]))]
++            self.coeffs = [
++                ([(FermionicOp, f_index), (SpinOp, s_index)], coeff)
++                for f_index in range(len(self.ops[FermionicOp]))
++                for s_index in range(len(self.ops[SpinOp]))
++            ]
+         else:
+             self.coeffs = data[1]
+ 
+@@ -92,22 +97,23 @@ class MixedOp(SecondQuantizedOp):
+ 
+         if isinstance(other, FermionicOp):
+             f_op_list.append(other)
+-            new_ops = [(FermionicOp, len(f_op_list)-1)]
++            new_ops = [(FermionicOp, len(f_op_list) - 1)]
+             new_coeffs = coeffs + [(new_ops, 1)]
+ 
+         elif isinstance(other, SpinOp):
+             s_op_list.append(other)
+-            new_ops = [(SpinOp, len(s_op_list)-1)]
++            new_ops = [(SpinOp, len(s_op_list) - 1)]
+             new_coeffs = coeffs + [(new_ops, 1)]
+ 
+         else:
+-            offset_map = {FermionicOp: len(f_op_list),
+-                          SpinOp: len(s_op_list)}
++            offset_map = {FermionicOp: len(f_op_list), SpinOp: len(s_op_list)}
+ 
+             f_op_list += other.ops[FermionicOp]
+             s_op_list += other.ops[SpinOp]
+ 
+-            new_coeffs = coeffs + [([(x[0], x[1] + offset_map[x[0]]) for x in c[0]], c[1]) for c in other.coeffs]
++            new_coeffs = coeffs + [
++                ([(x[0], x[1] + offset_map[x[0]]) for x in c[0]], c[1]) for c in other.coeffs
++            ]
+ 
+         op_list = f_op_list + s_op_list
+         return MixedOp((op_list, new_coeffs))

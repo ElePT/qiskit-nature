@@ -1,0 +1,2117 @@
+diff --git a/qiskit_nature/operators/fermionic_op.py b/qiskit_nature/operators/fermionic_op.py
+new file mode 100644
+index 00000000..b9f4bb8c
+--- /dev/null
++++ b/qiskit_nature/operators/fermionic_op.py
+@@ -0,0 +1,692 @@
++# This code is part of Qiskit.
++#
++# (C) Copyright IBM 2021, 2022.
++#
++# This code is licensed under the Apache License, Version 2.0. You may
++# obtain a copy of this license in the LICENSE.txt file in the root directory
++# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
++#
++# Any modifications or derivative works of this code must retain this
++# copyright notice, and modified files need to carry a notice indicating
++# that they have been altered from the originals.
++
++"""The Fermionic-particle Operator."""
++
++from __future__ import annotations
++
++import re
++from collections import defaultdict
++from collections.abc import Iterable, Iterator
++from itertools import product
++from typing import Optional, Union, cast
++
++import numpy as np
++from scipy.sparse import csc_matrix
++
++from .second_quantized_op import SecondQuantizedOp
++
++
++_ZERO_LABELS = {
++    ("+", "+"),
++    ("+", "N"),
++    ("-", "-"),
++    ("-", "E"),
++    ("N", "E"),
++    ("E", "+"),
++    ("N", "-"),
++    ("E", "N"),
++}
++_MAPPING = {
++    ("I", "I"): "I",
++    ("I", "+"): "+",
++    ("I", "-"): "-",
++    ("I", "N"): "N",
++    ("I", "E"): "E",
++    ("+", "I"): "+",
++    ("+", "-"): "N",
++    ("+", "E"): "+",
++    ("-", "I"): "-",
++    ("-", "+"): "E",
++    ("-", "N"): "-",
++    ("N", "I"): "N",
++    ("N", "+"): "+",
++    ("N", "N"): "N",
++    ("E", "I"): "E",
++    ("E", "-"): "-",
++    ("E", "E"): "E",
++}
++
++
++class FermionicOp(SecondQuantizedOp):
++    r"""
++    N-mode Fermionic operator.
++
++    **Label**
++
++    Allowed characters for the label are `I`, `-`, `+`, `N`, and, `E`.
++
++    .. list-table::
++        :header-rows: 1
++
++        * - Label
++          - Mathematical Representation
++          - Meaning
++        * - `I`
++          - :math:`I`
++          - Identity operator
++        * - `-`
++          - :math:`c`
++          - Annihilation operator
++        * - `+`
++          - :math:`c^\dagger`
++          - Creation operator
++        * - `N`
++          - :math:`n = c^\dagger c`
++          - Number operator
++        * - `E`
++          - :math:`I - n = c c^\dagger`
++          - Hole number
++
++    There are two types of label modes for this class.
++    The label mode is automatically detected by the presence of underscore `_`.
++
++    1. Dense Label
++
++    Dense labels are strings with allowed characters above.
++    This is similar to Qiskit's string-based representation of qubit operators.
++    For example,
++
++    .. code-block:: python
++
++        "+"
++        "II++N-IE"
++
++    are possible labels.
++
++    2. Sparse Label
++
++    When the parameter `register_length` is passed to :meth:`~FermionicOp.__init__`,
++    label is assumed to be a sparse label.
++    A sparse label is a string consisting of a space-separated list of words.
++    Each word must look like :code:`[+-INE]_<index>`, where the :code:`<index>`
++    is a non-negative integer representing the index of the fermionic mode.
++    For example,
++
++    .. code-block:: python
++
++        "+_0"
++        "-_2"
++        "+_0 -_1 +_4 +_10"
++
++    are possible labels.
++
++    As a programmatic approach, you can input a list of tuples as the labels,
++    too. Thus, a FermionicOp can be initialized using a list of tuples of the
++    form, `(action, index)`. `action` is a string where `-` denotes an
++    annihilation and `+` a creation operation. The `index` is also an integer
++    denoting the fermionic mode.
++    The following labels are equivalent to the example given for sparse labels
++    above:
++
++    .. code-block:: python
++
++        [("+", 0)]
++        [("-", 2)]
++        [("+", 0), ("-", 1), ("+", 4), ("+", 10)]
++
++    **Initialization**
++
++    The FermionicOp can be initialized in several ways:
++
++        `FermionicOp(label)`
++          A label consists of the permitted characters listed above.
++
++        `FermionicOp(tuple)`
++          Valid tuples are of the form `(label, coeff)`. `coeff` can be either `int`, `float`,
++          or `complex`.
++
++        `FermionicOp(list)`
++          The list must be a list of valid tuples as explained above.
++
++    **Output of str and repr**
++
++    By default, the output of str and repr is truncated.
++    You can change the number of characters with `set_truncation`.
++    If you pass 0 to `set_truncation`, truncation is disabled and the full output will be printed.
++
++    Example:
++
++    .. jupyter-execute::
++
++      from qiskit_nature.second_q.operators import FermionicOp
++
++      print("truncated str output")
++      print(sum(FermionicOp("I", display_format="sparse") for _ in range(25)))
++
++      FermionicOp.set_truncation(0)
++      print("not truncated str output")
++      print(sum(FermionicOp("I", display_format="sparse") for _ in range(25)))
++
++
++    **Algebra**
++
++    This class supports the following basic arithmetic operations: addition, subtraction, scalar
++    multiplication, operator multiplication, and adjoint.
++    For example,
++
++    Addition
++
++    .. jupyter-execute::
++
++      0.5 * FermionicOp("I+", display_format="dense") + FermionicOp("+I", display_format="dense")
++
++    Sum
++
++    .. jupyter-execute::
++
++      0.25 * sum(FermionicOp(label, display_format="sparse") for label in ['+_0', '-_1', 'N_2'])
++
++    Operator multiplication
++
++    .. jupyter-execute::
++
++      print(FermionicOp("+-", display_format="dense") @ FermionicOp("E+", display_format="dense"))
++
++    Dagger
++
++    .. jupyter-execute::
++
++      ~FermionicOp("+", display_format="dense")
++
++    In principle, you can also add :class:`FermionicOp` and integers, but the only valid case is the
++    addition of `0 + FermionicOp`. This makes the `sum` operation from the example above possible
++    and it is useful in the following scenario:
++
++    .. code-block:: python
++
++        fermion = 0
++        for i in some_iterable:
++            some processing
++            fermion += FermionicOp(somedata)
++
++    **Iteration**
++
++    FermionicOps are iterable. Iterating a FermionicOp yields (term, coefficient) pairs
++    describing the terms contained in the operator. Each term is a list of tuples of the
++    form (action, index), where the action is either "+" or "-" and the index is the integer
++    index of the factor in the term.
++    """
++
++    _truncate = 200
++
++    def __init__(
++        self,
++        data: Union[
++            str,
++            tuple[str, complex],
++            list[tuple[str, complex]],
++            list[tuple[str, float]],
++            list[tuple[list[tuple[str, int]], complex]],
++            list[tuple[tuple[tuple[str, int], ...], complex]],
++        ],
++        register_length: Optional[int] = None,
++        display_format: str = "sparse",
++    ):
++        """
++        Args:
++            data: Input data for FermionicOp. The allowed data is label str,
++                  tuple (label, coeff), or list [(label, coeff)].
++            register_length: positive integer that represents the length of registers.
++            display_format: If sparse, the label is represented sparsely during output.
++                            if dense, the label is represented densely during output. (default: sparse)
++
++        Raises:
++            ValueError: given data is invalid value.
++            TypeError: given data has invalid type.
++        """
++        self.display_format = display_format
++
++        self._data: list[tuple[tuple[tuple[str, int], ...], complex]]
++
++        if not isinstance(data, str) and not data:
++            # empty list or tuple means zero operator
++            self._data = [((), 0j)]
++        elif (
++            isinstance(data, list)
++            and isinstance(data[0], tuple)
++            and isinstance(data[0][0], tuple)
++            and not isinstance(data[0][0], str)
++        ):
++            data = cast("list[tuple[tuple[tuple[str, int], ...], complex]]", data)
++            self._data = data
++        elif (
++            isinstance(data, list)
++            and isinstance(data[0], tuple)
++            and isinstance(data[0][0], Iterable)
++            and not isinstance(data[0][0], str)
++        ):
++            self._data = [
++                (tuple(cast("Iterable[tuple[str, int]]", term)), coeff) for term, coeff in data
++            ]
++        else:
++            if not isinstance(data, (tuple, list, str)):
++                raise TypeError(f"Type of data must be str, tuple, or list, not {type(data)}.")
++
++            if isinstance(data, str):
++                data = [(data, complex(1))]
++
++            elif isinstance(data, tuple):
++                if not isinstance(data[0], str) or not isinstance(data[1], (int, float, complex)):
++                    raise TypeError(
++                        f"Data tuple must be (str, number), not ({type(data[0])}, {type(data[1])})."
++                    )
++                data = [(data[0], complex(data[1]))]
++
++            else:
++                if (
++                    not isinstance(data[0][0], list)
++                    and not isinstance(data[0][0], str)
++                    or not isinstance(data[0][1], (int, float, complex))
++                ):
++                    raise TypeError(
++                        "Data list must be [(str, number)] or [([(int, int)], number)]."
++                    )
++
++            data = cast("list[tuple[str, complex]]", data)
++            # dense label
++            if all("_" not in label for label, _ in data):
++                self._data = [
++                    (
++                        tuple(self._substituted_label([(c, int(i)) for i, c in enumerate(label)])),
++                        complex(coeff),
++                    )
++                    for label, coeff in data
++                ]
++                # sparse label
++                if register_length is None:
++                    register_length = max(len(label) for label, _ in data)
++            else:
++                self._data = [
++                    (
++                        tuple(self._substituted_label([(c[0], int(c[2:])) for c in label.split()])),
++                        complex(coeff),
++                    )
++                    for label, coeff in data
++                ]
++
++        if register_length is None:
++            self._register_length = (
++                max(max((index for _, index in l), default=0) for l, _ in self._data) + 1
++            )
++        else:
++            self._register_length = register_length
++
++    def _substituted_label(self, label) -> Iterator[tuple[str, int]]:
++        for c, index in label:
++            if c == "+":
++                yield "+", index
++            elif c == "-":
++                yield "-", index
++            elif c == "N":
++                yield "+", index
++                yield "-", index
++            elif c == "E":
++                yield "-", index
++                yield "+", index
++            elif c == "I":
++                continue
++            else:
++                raise ValueError(f"Invalid label {c}_{index} is given.")
++
++    def __repr__(self) -> str:
++        data = self.to_list()
++        if len(self) == 1:
++            if data[0][1] == 1:
++                data_str = f"'{data[0][0]}'"
++            data_str = f"'{data[0]}'"
++        data_str = f"{data}"
++
++        if FermionicOp._truncate and len(data_str) > FermionicOp._truncate:
++            data_str = data_str[0 : FermionicOp._truncate - 5] + "..." + data_str[-2:]
++        return (
++            "FermionicOp("
++            f"{data_str}, "
++            f"register_length={self.register_length}, "
++            f"display_format='{self.display_format}'"
++            ")"
++        )
++
++    def terms(self) -> Iterator[tuple[tuple[tuple[str, int], ...], complex]]:
++        """Iterate through operator terms."""
++        return iter(self._data)
++
++    @classmethod
++    def set_truncation(cls, val: int) -> None:
++        """Set the max number of characters to display before truncation.
++        Args:
++            val: the number of characters.
++
++        .. note::
++            Truncation will be disabled if the truncation value is set to 0.
++        """
++        cls._truncate = int(val)
++
++    def __str__(self) -> str:
++        """Sets the representation of `self` in the console."""
++
++        if len(self) == 1:
++            label, coeff = self.to_list()[0]
++            if label:
++                return f"{coeff} * ({label})"
++            else:
++                return f"{coeff}"
++        pre = (
++            "Fermionic Operator\n"
++            f"register length={self.register_length}, number terms={len(self)}\n"
++        )
++        ret = "  " + "\n+ ".join(
++            [f"{coeff} * ( {label} )" if label else f"{coeff}" for label, coeff in self.to_list()]
++        )
++        if FermionicOp._truncate and len(ret) > FermionicOp._truncate:
++            ret = ret[0 : FermionicOp._truncate - 4] + " ..."
++        return pre + ret
++
++    def __len__(self):
++        return len(self._data)
++
++    @property
++    def register_length(self) -> int:
++        """Gets the register length."""
++        return self._register_length
++
++    def mul(self, other: complex) -> FermionicOp:
++        if not isinstance(other, (int, float, complex)):
++            raise TypeError(
++                f"Unsupported operand type(s) for *: 'FermionicOp' and '{type(other).__name__}'"
++            )
++        return FermionicOp(
++            [(label, coeff * other) for label, coeff in self._data],
++            register_length=self.register_length,
++            display_format=self.display_format,
++        )
++
++    def compose(self, other: FermionicOp) -> FermionicOp:
++        if not isinstance(other, FermionicOp):
++            from .mixed_op import MixedOp
++
++            return MixedOp(([self, other], 1))
++            # else:
++            #     raise TypeError(
++            #         f"Unsupported operand type(s) for *: 'FermionicOp' and '{type(other).__name__}'"
++            #     )
++
++        new_data = list(
++            filter(
++                lambda x: x[1] != 0,
++                (
++                    (label1 + label2, cf1 * cf2)
++                    for label2, cf2 in other._data
++                    for label1, cf1 in self._data
++                ),
++            )
++        )
++        register_length = max(self.register_length, other.register_length)
++        display_format = (
++            "sparse"
++            if self.display_format == "sparse" or other.display_format == "sparse"
++            else "dense"
++        )
++        if not new_data:
++            return FermionicOp(("", 0), register_length, display_format)
++        return FermionicOp(new_data, register_length, display_format)
++
++    def add(self, other: FermionicOp) -> FermionicOp:
++        if not isinstance(other, FermionicOp):
++            raise TypeError(
++                f"Unsupported operand type(s) for +: 'FermionicOp' and '{type(other).__name__}'"
++            )
++
++        return FermionicOp(
++            self._data + other._data,
++            max(self.register_length, other.register_length),
++            self.display_format or other.display_format,
++        )
++
++    # pylint: disable=arguments-differ
++    def to_list(
++        self,
++        display_format: Optional[str] = None,
++    ) -> list[tuple[str, complex]]:
++        """Returns the operators internal contents in list-format.
++
++        Args:
++            display_format: when specified this will overwrite ``self.display_format``. Can
++                be either 'dense' or 'sparse'. See the class documentation for more details.
++
++        Returns:
++            A list of tuples consisting of the dense label and corresponding coefficient.
++
++        Raises:
++            ValueError: if the given format is invalid.
++        """
++        if display_format is not None:
++            display_format = display_format.lower()
++            if display_format not in {"sparse", "dense"}:
++                raise ValueError(
++                    f"Invalid `display_format` {display_format} is given."
++                    "`display_format` must be 'dense' or 'sparse'."
++                )
++        else:
++            display_format = self.display_format
++        if display_format == "sparse":
++            return [
++                (" ".join(f"{char}_{index}" for char, index in label_list), coeff)
++                for label_list, coeff in self._data
++            ]
++        return self._to_dense_label_data()
++
++    def to_matrix(self, sparse: Optional[bool] = True) -> Union[csc_matrix, np.ndarray]:
++        """Convert to a matrix representation over the full fermionic Fock space in occupation number
++        basis. The basis states are ordered in increasing bitstring order as 0000, 0001, ..., 1111.
++
++        Args:
++            sparse: If true, the matrix is returned as a sparse csc_matrix, else it is returned as a
++            dense numpy array.
++
++        Returns:
++            The matrix of the operator in the Fock basis (scipy.sparse.csc_matrix or numpy.ndarray
++            with dtype=numpy.complex128)
++        """
++
++        csc_data, csc_col, csc_row = [], [], []
++
++        dimension = 1 << self.register_length
++
++        # loop over all columns of the matrix
++        for col_idx in range(dimension):
++            initial_occupations = [occ == "1" for occ in f"{col_idx:0{self.register_length}b}"]
++            # loop over the terms in the operator data
++            for opstring, prefactor in self.simplify()._data:
++                # check if op string is the identity
++                if not opstring:
++                    csc_data.append(prefactor)
++                    csc_row.append(col_idx)
++                    csc_col.append(col_idx)
++                else:
++                    occupations = initial_occupations.copy()
++                    sign = 1
++                    mapped_to_zero = False
++
++                    # apply terms sequentially to the current basis state
++                    for char, index in reversed(opstring):
++                        occ = occupations[index]
++                        if (char[0] == "+") == occ:
++                            # Applying the creation operator on an occupied state maps to zero. So
++                            # does applying the annihilation operator on an unoccupied state.
++                            mapped_to_zero = True
++                            break
++                        sign *= (-1) ** sum(occupations[:index])
++                        occupations[index] = not occ
++
++                    # add data point to matrix in the correct row
++                    if not mapped_to_zero:
++                        row_idx = sum(int(occ) << idx for idx, occ in enumerate(occupations[::-1]))
++                        csc_data.append(sign * prefactor)
++                        csc_row.append(row_idx)
++                        csc_col.append(col_idx)
++
++        sparse_mat = csc_matrix(
++            (csc_data, (csc_row, csc_col)),
++            shape=(dimension, dimension),
++            dtype=complex,
++        )
++
++        if sparse:
++            return sparse_mat
++        else:
++            return sparse_mat.toarray()
++
++    def adjoint(self) -> FermionicOp:
++        return FermionicOp(
++            [
++                (
++                    tuple(("+" if c == "-" else "-", i) for c, i in reversed(label)),
++                    coeff.conjugate(),
++                )
++                for label, coeff in self._data
++            ],
++            register_length=self.register_length,
++            display_format=self.display_format,
++        )
++
++    def simplify(self, atol: Optional[float] = None) -> FermionicOp:
++        if atol is None:
++            atol = self.atol
++
++        data = defaultdict(complex)  # type: dict[str, complex]
++        for label, coeff in self._to_dense_label_data():
++            data[label] += coeff
++        terms = [
++            (label, coeff) for label, coeff in data.items() if not np.isclose(coeff, 0.0, atol=atol)
++        ]
++        return FermionicOp(terms, display_format=self.display_format)
++
++    @property
++    def display_format(self):
++        """Return the display format"""
++        return self._display_format
++
++    @display_format.setter
++    def display_format(self, display_format: str):
++        """Set the display format of labels.
++
++        Args:
++            display_format: display format for labels. "sparse" or "dense" is available.
++
++        Raises:
++            ValueError: invalid mode is given
++        """
++        display_format = display_format.lower()
++        if display_format not in {"sparse", "dense"}:
++            raise ValueError(
++                f"Invalid `display_format` {display_format} is given."
++                "`display_format` must be 'dense' or 'sparse'."
++            )
++        self._display_format = display_format
++
++    def _to_dense_label_data(self) -> list[tuple[str, complex]]:
++        dense_label_data = []
++        for label, coeff in self._data:
++            label_list = ["I"] * self.register_length
++            for char, index in label:
++                if (label_list[index], char) in _ZERO_LABELS:
++                    break
++                label_list[index] = _MAPPING[(label_list[index], char)]
++                if index != self.register_length and char in {"+", "-"}:
++                    exchange_label = label_list[index + 1 :]
++                    num_exchange = exchange_label.count("+") + exchange_label.count("-")
++                    coeff *= -1 if num_exchange % 2 else 1
++            else:
++                dense_label_data.append(("".join(label_list), coeff))
++        if not dense_label_data:
++            return [("I" * self.register_length, 0j)]
++        return dense_label_data
++
++    def normal_ordered(self) -> FermionicOp:
++        """Convert to the equivalent operator with normal order.
++
++        Returns a new operator (the original operator is not modified).
++        The returned operator is in sparse label mode.
++
++        .. note::
++
++            This method implements the transformation of an operator to the normal ordered operator.
++            The transformation is calculated by considering all commutation relations between the
++            operators. For example, for the case :math:`\\colon c_0 c_0^\\dagger\\colon`
++            where :math:`c_0` is an annihilation operator,
++            this method returns :math:`1 - c_0^\\dagger c_0` due to commutation relations.
++            See the reference: https://en.wikipedia.org/wiki/Normal_order#Multiple_fermions.
++
++        Returns:
++            The normal ordered operator.
++        """
++        temp_display_label = self.display_format
++        self.display_format = "dense"
++        ret = 0
++
++        for label, coeff in self.to_list():
++            splits = label.split("E")
++
++            for inter_ops in product("IN", repeat=len(splits) - 1):
++                label = splits[0]
++                label += "".join(link + next_base for link, next_base in zip(inter_ops, splits[1:]))
++
++                pluses = [it.start() for it in re.finditer(r"\+|N", label)]
++                minuses = [it.start() for it in re.finditer(r"-|N", label)]
++
++                count = sum(1 for plus in pluses for minus in minuses if plus > minus)
++                sign_swap = (-1) ** count
++                sign_n = (-1) ** inter_ops.count("N")
++                new_coeff = coeff * sign_n * sign_swap
++
++                ret += new_coeff * FermionicOp(
++                    " ".join([f"+_{i}" for i in pluses] + [f"-_{i}" for i in minuses]),
++                    self.register_length,
++                    "sparse",
++                )
++
++        self.display_format = temp_display_label
++
++        if isinstance(ret, FermionicOp):
++            return ret.simplify()
++        return FermionicOp(("", 0), self.register_length, "sparse")
++
++    @classmethod
++    def zero(cls, register_length: int) -> FermionicOp:
++        """Constructs a zero-operator.
++
++        Args:
++            register_length: the length of the operator.
++
++        Returns:
++            The zero-operator of the given length.
++        """
++        return FermionicOp(("", 0.0), register_length=register_length, display_format="sparse")
++
++    @classmethod
++    def one(cls, register_length: int) -> FermionicOp:
++        """Constructs a unity-operator.
++
++        Args:
++            register_length: the length of the operator.
++
++        Returns:
++            The unity-operator of the given length.
++        """
++        return FermionicOp(("", 1.0), register_length=register_length, display_format="sparse")
++
++    def is_hermitian(self, atol: Optional[float] = None) -> bool:
++        if atol is None:
++            atol = self.atol
++        diff = (self - self.adjoint()).normal_ordered().simplify(atol=atol)
++        return all(np.isclose(coeff, 0.0, atol=atol) for _, coeff in diff.to_list())
+diff --git a/qiskit_nature/operators/mixed_op.py b/qiskit_nature/operators/mixed_op.py
+new file mode 100644
+index 00000000..c5e97f1a
+--- /dev/null
++++ b/qiskit_nature/operators/mixed_op.py
+@@ -0,0 +1,136 @@
++from __future__ import annotations
++
++from .second_quantized_op import SecondQuantizedOp
++from .fermionic_op import FermionicOp
++from .spin_op import SpinOp
++from typing import cast
++
++from copy import copy
++import numpy as np
++
++
++class MixedOp(SecondQuantizedOp):
++    def _assign_data(self, op):
++        if isinstance(op, FermionicOp) or isinstance(op, SpinOp):
++            if type(op) in self.ops:
++                self.ops[type(op)].append(op)
++            else:
++                self.ops[type(op)] = [op]
++        else:
++            raise ValueError(f"Operators of type {type(op)} are not supported.")
++
++    def __init__(
++        self,
++        data: SecondQuantizedOp
++        | list[SecondQuantizedOp]
++        | tuple[
++            SecondQuantizedOp | list[SecondQuantizedOp],
++            float | complex | list[tuple[list[tuple[type(SecondQuantizedOp), int]], complex]],
++        ],
++    ):
++
++        # VibrationalOp is currently not supported
++        self.ops: dict[type(SecondQuantizedOp), list[SecondQuantizedOp]] = {}
++        self.coeffs: list[tuple[list[tuple[type(SecondQuantizedOp), int]], complex]] = []
++
++        if isinstance(data, tuple):
++            op_list = data[0]
++            if not isinstance(data[1], list):
++                coeff = cast("complex", data[1])
++        else:
++            op_list = data
++            coeff = 1
++
++        # first, we create the dictionary of operators
++        if isinstance(op_list, list):
++            for op in op_list:
++                self._assign_data(op)
++        else:
++            self._assign_data(op_list)
++
++        if not isinstance(data[1], list):
++            self.coeffs = [
++                ([(FermionicOp, f_index), (SpinOp, s_index)], coeff)
++                for f_index in range(len(self.ops[FermionicOp]))
++                for s_index in range(len(self.ops[SpinOp]))
++            ]
++        else:
++            self.coeffs = data[1]
++
++    def __repr__(self) -> str:
++
++        repr_fermionic = repr(self.ops[FermionicOp])
++        repr_spin = repr(self.ops[SpinOp])
++
++        repr_coeffs = []
++        for c in self.coeffs:
++            new_coeff = c[1]
++            new_ops = [("FermionicOp" if x[0] is FermionicOp else "SpinOp", x[1]) for x in c[0]]
++            repr_coeffs.append((new_ops, new_coeff))
++        return (
++            f"MixedOp( \n "
++            f"Operators = ({repr_fermionic}, \n {repr_spin}\n"
++            f"Mix Coefficients = ({repr_coeffs}) \n * )"
++        )
++
++    def __len__(self):
++        return len(self.ops[FermionicOp]) + len(self.ops[SpinOp])
++
++    def mul(self, other: complex) -> MixedOp:
++        if not isinstance(other, (int, float, complex)):
++            raise TypeError(
++                f"Unsupported operand type(s) for *: 'MixedOp' and '{type(other).__name__}'"
++            )
++        op_list = self.ops[FermionicOp] + self.ops[SpinOp]
++        new_coeffs = [(c[0], c[1] * other) for c in self.coeffs]
++
++        return MixedOp((op_list, new_coeffs))
++
++    def compose(self, other: MixedOp) -> MixedOp:
++        raise NotImplementedError
++
++    def add(self, other: FermionicOp | SpinOp | MixedOp) -> MixedOp:
++
++        f_op_list = copy(self.ops[FermionicOp])
++        s_op_list = copy(self.ops[SpinOp])
++        coeffs = copy(self.coeffs)
++
++        if isinstance(other, FermionicOp):
++            f_op_list.append(other)
++            new_ops = [(FermionicOp, len(f_op_list) - 1)]
++            new_coeffs = coeffs + [(new_ops, 1)]
++
++        elif isinstance(other, SpinOp):
++            s_op_list.append(other)
++            new_ops = [(SpinOp, len(s_op_list) - 1)]
++            new_coeffs = coeffs + [(new_ops, 1)]
++
++        else:
++            offset_map = {FermionicOp: len(f_op_list), SpinOp: len(s_op_list)}
++
++            f_op_list += other.ops[FermionicOp]
++            s_op_list += other.ops[SpinOp]
++
++            new_coeffs = coeffs + [
++                ([(x[0], x[1] + offset_map[x[0]]) for x in c[0]], c[1]) for c in other.coeffs
++            ]
++
++        op_list = f_op_list + s_op_list
++        return MixedOp((op_list, new_coeffs))
++
++    def to_list(
++        self,
++        display_format: str | None = None,
++    ) -> list[tuple[str, complex]]:
++        raise NotImplementedError
++
++    def adjoint(self) -> MixedOp:
++        raise NotImplementedError
++
++    def simplify(self, atol: float | None = None) -> MixedOp:
++        raise NotImplementedError
++
++    @property
++    def register_length(self) -> int:
++        """Gets the register length."""
++        raise NotImplementedError
+diff --git a/qiskit_nature/operators/second_quantized_op.py b/qiskit_nature/operators/second_quantized_op.py
+new file mode 100644
+index 00000000..3f763007
+--- /dev/null
++++ b/qiskit_nature/operators/second_quantized_op.py
+@@ -0,0 +1,128 @@
++# This code is part of Qiskit.
++#
++# (C) Copyright IBM 2021, 2022.
++#
++# This code is licensed under the Apache License, Version 2.0. You may
++# obtain a copy of this license in the LICENSE.txt file in the root directory
++# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
++#
++# Any modifications or derivative works of this code must retain this
++# copyright notice, and modified files need to carry a notice indicating
++# that they have been altered from the originals.
++
++"""The Sum Operator base interface."""
++
++from __future__ import annotations
++
++from abc import ABC, abstractmethod
++from typing import Any, Optional
++
++import numpy as np
++from qiskit.opflow.mixins import StarAlgebraMixin
++from qiskit.quantum_info.operators.mixins import TolerancesMixin
++
++
++class SecondQuantizedOp(StarAlgebraMixin, TolerancesMixin, ABC):
++    """The Second Quantized Operator base interface.
++
++    This interface should be implemented by all creation- and annihilation-type particle operators
++    in the second-quantized formulation.
++    """
++
++    @property
++    @abstractmethod
++    def register_length(self) -> int:
++        """Getter for the length of the particle register that the SumOp acts on."""
++        raise NotImplementedError
++
++    def __pow__(self, power):
++        if power == 0:
++            return self.__class__("I" * self.register_length)
++
++        return super().__pow__(power)
++
++    @abstractmethod
++    def simplify(self, atol: Optional[float] = None):
++        """Simplify the operator.
++
++        Merges terms with same labels and eliminates terms with coefficients close to 0.
++        Returns a new operator (the original operator is not modified).
++
++        Args:
++            atol: Absolute numerical tolerance. The default behavior is to use ``self.atol``,
++                which would be 1e-8 unless changed by the user.
++        Returns:
++            The simplified operator.
++        """
++        raise NotImplementedError
++
++    @abstractmethod
++    def to_list(self) -> list[tuple[str, complex]]:
++        """Returns the operators internal contents in list-format."""
++        raise NotImplementedError
++
++    def is_hermitian(self, atol: Optional[float] = None) -> bool:
++        """Checks whether the operator is hermitian.
++
++        Args:
++            atol: Absolute numerical tolerance. The default behavior is to use ``self.atol``,
++                which would be 1e-8 unless changed by the user.
++
++        Returns:
++            True if the operator is hermitian up to numerical tolerance, False otherwise.
++        """
++        return self.equiv(self.adjoint(), atol=atol)
++
++    def equiv(self, other: Any, atol: Optional[float] = None) -> bool:
++        """Checks whether this operator is approximately equal to another operator.
++
++        Note that this method does not normal-order the operators before comparing them,
++        which may affect the result.
++
++        Args:
++            other: The operator to compare to for approximate equality.
++            atol: Absolute numerical tolerance. The default behavior is to use ``self.atol``,
++                which would be 1e-8 unless changed by the user.
++
++        Returns:
++            True if the operators are equal up to numerical tolerance, False otherwise.
++
++        Raises:
++            TypeError: Cannot compare with an object of an unsupported type.
++        """
++        if not isinstance(other, type(self)):
++            raise TypeError(f"Cannot compare objects of types {type(self)} and {type(other)}.")
++        if atol is None:
++            atol = self.atol
++        diff = (self - other).simplify(atol=atol)
++        return all(np.isclose(coeff, 0.0, atol=atol) for _, coeff in diff.to_list())
++
++    def induced_norm(self, order: int = 1) -> float:
++        r"""Returns the p-norm induced by the operator coefficients.
++
++        If the operator is represented as a sum of terms
++
++        .. math::
++            \sum_i w_i H_i
++
++        then the induced :math:`p`-norm is
++
++        .. math::
++            \left(\sum_i |w_i|^p \right)^{1/p}
++
++        This is the standard :math:`p`-norm of the operator coefficients
++        considered as a vector (see `https://en.wikipedia.org/wiki/Norm_(mathematics)#p-norm`_).
++        Note that this method does not normal-order or simplify the operator
++        before computing the norm; performing either of those operations
++        can affect the result.
++
++        Args:
++            order: Order :math:`p` of the norm. The default value is 1.
++
++        Returns:
++            The induced norm.
++
++        .. _https://en.wikipedia.org/wiki/Norm_(mathematics)#p-norm:
++            https://en.wikipedia.org/wiki/Norm_(mathematics)#p-norm
++        """
++        return sum(abs(coeff) ** order for _, coeff in self.to_list()) ** (1 / order)
+diff --git a/qiskit_nature/operators/spin_op.py b/qiskit_nature/operators/spin_op.py
+new file mode 100644
+index 00000000..c5d0afbd
+--- /dev/null
++++ b/qiskit_nature/operators/spin_op.py
+@@ -0,0 +1,549 @@
++# This code is part of Qiskit.
++#
++# (C) Copyright IBM 2021, 2022.
++#
++# This code is licensed under the Apache License, Version 2.0. You may
++# obtain a copy of this license in the LICENSE.txt file in the root directory
++# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
++#
++# Any modifications or derivative works of this code must retain this
++# copyright notice, and modified files need to carry a notice indicating
++# that they have been altered from the originals.
++
++"""A generic Spin operator.
++
++Note: this implementation differs fundamentally from the `FermionicOp`
++as it relies on the mathematical representation of spin matrices as (e.g.) explained in [1].
++
++[1]: https://en.wikipedia.org/wiki/Spin_(physics)#Higher_spins
++"""
++
++import re
++from fractions import Fraction
++from functools import lru_cache, partial, reduce
++from itertools import product
++from typing import List, Optional, Sequence, Tuple, Union, cast
++
++import numpy as np
++from qiskit.utils.validation import validate_min
++from qiskit_nature import QiskitNatureError
++
++from .second_quantized_op import SecondQuantizedOp
++
++
++class SpinOp(SecondQuantizedOp):
++    """XYZ-ordered Spin operators.
++
++    **Label**
++
++    Allowed characters for primitives of labels are I, X, Y, Z, +, and -.
++
++    .. list-table::
++        :header-rows: 1
++
++        * - Label
++          - Mathematical Representation
++          - Meaning
++        * - `I`
++          - :math:`I`
++          - Identity operator
++        * - `X`
++          - :math:`S^x`
++          - :math:`x`-component of the spin operator
++        * - `Y`
++          - :math:`S^y`
++          - :math:`y`-component of the spin operator
++        * - `Z`
++          - :math:`S^z`
++          - :math:`z`-component of the spin operator
++        * - `+`
++          - :math:`S^+`
++          - Raising operator
++        * - `-`
++          - :math:`S^-`
++          - Lowering operator
++
++    There are two types of label modes for :class:`SpinOp`.
++    The label mode is automatically detected.
++
++    1. Dense Label (default, `register_length = None`)
++
++    Dense labels are strings in which each character maps to a unique spin mode.
++    This is similar to Qiskit's string-based representation of qubit operators.
++    For example,
++
++    .. code-block:: python
++
++        "X"
++        "IIYYZ-IX++"
++
++    are possible labels.
++    Note, that dense labels are less powerful than sparse ones because they cannot represent
++    all possible :class:`SpinOp`. You will, for example, not be able to apply multiple operators
++    on the same index within a single label.
++
++    2. Sparse Label (`register_length` is passed)
++
++    A sparse label is a string consisting of a space-separated list of words.
++    Each word must look like :code:`[XYZI+-]_<index>^<power>`,
++    where the :code:`<index>` is a non-negative integer representing the index of the spin mode
++    and the :code:`<power>` is a positive integer indicating the number of times the given operator
++    is applied to the mode at :code:`<index>`.
++    You can omit :code:`<power>`, implying a single application of the operator (:code:`power = 1`).
++    For example,
++
++    .. code-block:: python
++
++        "X_0"
++        "Y_0^2"
++        "Y_0^2 Z_0^3 X_1^1 Y_1^2 Z_1^2"
++
++    are possible labels.
++    For each :code:`index` the operations `X`, `Y` and `Z` can only be specified exclusively in
++    this order. `+` and `-` cannot be used with `X` and `Y`
++    because ladder operators will be parsed into `X` and `Y`.
++    Thus, :code:`"Z_0 X_0"`, :code:`"Z_0 +_0"`, and :code:`"+_0 X_0"` are invalid labels.
++    The indices must be ascending order.
++
++    :code:`"+_i -_i"` is supported.
++    This pattern is parsed to :code:`+_i -_i = X_i^2 + Y_i^2 + Z_i`.
++
++    **Initialization**
++
++    The :class:`SpinOp` can be initialized by the list of tuples.
++    For example,
++
++    .. jupyter-execute::
++
++        from qiskit_nature.second_q.operators import SpinOp
++
++        x = SpinOp("X", spin=3/2)
++        y = SpinOp("Y", spin=3/2)
++        z = SpinOp("Z", spin=3/2)
++
++    are :math:`S^x, S^y, S^z` for spin 3/2 system.
++    Two qutrit Heisenberg model with transverse magnetic field is
++
++    .. jupyter-execute::
++
++        SpinOp(
++            [
++                ("XX", -1),
++                ("YY", -1),
++                ("ZZ", -1),
++                ("ZI", -0.3),
++                ("IZ", -0.3),
++            ],
++            spin=1
++        )
++
++    This means :math:`- S^x_0 S^x_1 - S^y_0 S^y_1 - S^z_0 S^z_1 - 0.3 S^z_0 - 0.3 S^z_1`.
++
++    :class:`SpinOp` can be initialized with internal data structure (`numpy.ndarray`) directly.
++    In this case, `data` is a tuple of two elements: `spin_array` and `coeffs`.
++    `spin_array` is 3-dimensional `ndarray`. 1st axis has three elements 0, 1, and 2 corresponding
++    to x, y, and z.  2nd axis represents the index of terms.
++    3rd axis represents the index of register.
++    `coeffs` is one-dimensional `ndarray` with the length of the number of terms.
++
++    **Algebra**
++
++    :class:`SpinOp` supports the following basic arithmetic operations: addition, subtraction,
++    scalar multiplication, and adjoint.
++    For example,
++
++    Raising Operator (addition and scalar multiplication)
++
++    .. jupyter-execute::
++
++        x + 1j * y
++
++    Adjoint
++
++    .. jupyter-execute::
++
++        ~(1j * z)
++
++    """
++
++    def __init__(
++        self,
++        data: Union[
++            str,
++            List[Tuple[str, complex]],
++            Tuple[np.ndarray, np.ndarray],
++        ],
++        spin: Union[float, Fraction] = Fraction(1, 2),
++        register_length: Optional[int] = None,
++    ):
++        r"""
++        Args:
++            data: label string, list of labels and coefficients. See the label section in
++                  the documentation of :class:`SpinOp` for more details.
++            spin: positive half-integer (integer or half-odd-integer) that represents spin.
++            register_length: length of the particle register.
++
++        Raises:
++            ValueError: invalid data is given.
++            QiskitNatureError: invalid spin value
++        """
++        self._coeffs: np.ndarray
++        self._spin_array: np.ndarray
++        dtype = np.complex128  # TODO: configurable data type. mixin?
++
++        spin = Fraction(spin)
++        if spin.denominator not in (1, 2):
++            raise QiskitNatureError(
++                f"spin must be a positive half-integer (integer or half-odd-integer), not {spin}."
++            )
++        self._dim = int(2 * spin + 1)
++
++        if isinstance(data, tuple) and all(isinstance(datum, np.ndarray) for datum in data):
++            self._spin_array = np.array(data[0], dtype=np.uint8)
++            self._register_length = self._spin_array.shape[2]
++            self._coeffs = np.array(data[1], dtype=dtype)
++
++        if (
++            isinstance(data, tuple)
++            and isinstance(data[0], str)
++            and isinstance(data[1], (int, float, complex))
++        ):
++            data = [data]
++
++        if isinstance(data, str):
++            data = [(data, 1)]
++
++        if isinstance(data, list):
++            if register_length is not None:  # Sparse label
++                # [IXYZ]_index^power (power is optional) or [+-]_index
++                sparse = r"([IXYZ]_\d+(\^\d+)?|[\+\-]_\d+?)"
++                # space (\s) separated sparse label or empty string
++                label_pattern = re.compile(rf"^({sparse}\s)*{sparse}(?!\s)$|^$")
++                invalid_labels = [label for label, _ in data if not label_pattern.match(label)]
++                if invalid_labels:
++                    raise ValueError(f"Invalid labels for sparse labels: {invalid_labels}.")
++            else:  # dense_label
++                # dense label (repeat of [IXYZ+-])
++                label_pattern = re.compile(r"^[IXYZ\+\-]+$")
++                invalid_labels = [label for label, _ in data if not label_pattern.match(label)]
++                if invalid_labels:
++                    raise ValueError(
++                        f"Invalid labels for dense labels: {invalid_labels} (if you want to use "
++                        "sparse label, you forgot a parameter `register_length`.)"
++                    )
++
++            # Parse ladder operators for special patterns.
++            if register_length is not None:
++                data = self._flatten_raising_lowering_ops(data, register_length)
++            data = self._flatten_ladder_ops(data)
++
++            # set coeffs
++            labels, coeffs = zip(*data)
++            self._coeffs = np.array(coeffs, dtype=dtype)
++
++            # set labels
++            if register_length is None:  # Dense label
++                self._register_length = len(labels[0])
++                label_pattern = re.compile(r"^[IXYZ]+$")
++                invalid_labels = [label for label in labels if not label_pattern.match(label)]
++                if invalid_labels:
++                    raise ValueError(f"Invalid labels for dense labels are given: {invalid_labels}")
++                self._spin_array = np.array(
++                    [
++                        [[char == "X", char == "Y", char == "Z"] for char in label]
++                        for label in labels
++                    ],
++                    dtype=np.uint8,
++                ).transpose((2, 0, 1))
++            else:  # Sparse label
++                validate_min("register_length", register_length, 1)
++                label_pattern = re.compile(r"^[IXYZ]_\d+(\^\d+)?$")
++                invalid_labels = [
++                    label
++                    for label in labels
++                    if not all(label_pattern.match(lb) for lb in label.split())
++                ]
++                if invalid_labels:
++                    raise ValueError(
++                        f"Invalid labels for sparse labels are given: {invalid_labels}"
++                    )
++                self._register_length = register_length
++                self._from_sparse_label(labels)
++
++        # Make immutable
++        self._spin_array.flags.writeable = False
++        self._coeffs.flags.writeable = False
++
++    def __repr__(self) -> str:
++        spin = self.spin
++        reg_len = self.register_length
++        if len(self) == 1:
++            if self._coeffs[0] == 1:  # str
++                data_str = f"'{self.to_list()[0][0]}'"
++            else:  # tuple
++                data_str = repr(self.to_list()[0])
++        else:  # list
++            data_str = repr(self.to_list())
++        return f"SpinOp({data_str}, spin={spin}, register_length={reg_len})"  # TODO truncate
++
++    def __str__(self) -> str:
++        if len(self) == 1:
++            label, coeff = self.to_list()[0]
++            return f"{label} * {coeff}"
++        return "  " + "\n+ ".join([f"{label} * {coeff}" for label, coeff in self.to_list()])
++
++    def __len__(self) -> int:
++        return len(self._coeffs)
++
++    @property
++    def register_length(self):
++        return self._register_length
++
++    @property
++    def spin(self) -> Fraction:
++        """The spin number.
++
++        Returns:
++            Spin number
++        """
++        return Fraction(self._dim - 1, 2)
++
++    @property
++    def x(self) -> np.ndarray:
++        """A np.ndarray storing the power i of (spin) X operators on the spin system.
++        I.e. [0, 4, 2] corresponds to X_0^0 \\otimes X_1^4 \\otimes X_2^2, where X_i acts on the
++        i-th spin system in the register.
++        """
++        return self._spin_array[0]
++
++    @property
++    def y(self) -> np.ndarray:
++        """A np.ndarray storing the power i of (spin) Y operators on the spin system.
++        I.e. [0, 4, 2] corresponds to Y_0^0 \\otimes Y_1^4 \\otimes Y_2^2, where Y_i acts on the
++        i-th spin system in the register.
++        """
++        return self._spin_array[1]
++
++    @property
++    def z(self) -> np.ndarray:
++        """A np.ndarray storing the power i of (spin) Z operators on the spin system.
++        I.e. [0, 4, 2] corresponds to Z_0^0 \\otimes Z_1^4 \\otimes Z_2^2, where Z_i acts on the
++        i-th spin system in the register.
++        """
++        return self._spin_array[2]
++
++    def add(self, other: "SpinOp") -> "SpinOp":
++        if not isinstance(other, SpinOp):
++            raise TypeError(
++                "Unsupported operand type(s) for +: 'SpinOp' and " f"'{type(other).__name__}'"
++            )
++
++        if self.register_length != other.register_length:
++            raise TypeError("Incompatible register lengths for '+'.")
++
++        if self.spin != other.spin:
++            raise TypeError(f"Addition between spin {self.spin} and spin {other.spin} is invalid.")
++
++        return SpinOp(
++            (
++                np.hstack((self._spin_array, other._spin_array)),
++                np.hstack((self._coeffs, other._coeffs)),
++            ),
++            spin=self.spin,
++        )
++
++    def compose(self, other):
++        # TODO: implement
++        raise NotImplementedError
++
++    def mul(self, other: complex) -> "SpinOp":
++        if not isinstance(other, (int, float, complex)):
++            raise TypeError(
++                f"Unsupported operand type(s) for *: 'SpinOp' and '{type(other).__name__}'"
++            )
++
++        return SpinOp((self._spin_array, self._coeffs * other), spin=self.spin)
++
++    def adjoint(self) -> "SpinOp":
++        if (self._spin_array.sum(axis=0) > 1).any():
++            # TODO: implement this when compose() will be implemented.
++            raise NotImplementedError(
++                "Adjoint for an operator which have multiple operators for the same register."
++            )
++        # Note: X, Y, Z are hermitian, therefore the dagger operation on a SpinOperator amounts
++        # to simply complex conjugating the coefficient.
++        return SpinOp((self._spin_array, self._coeffs.conjugate()), spin=self.spin)
++
++    def simplify(self, atol: Optional[float] = None) -> "SpinOp":
++        if atol is None:
++            atol = self.atol
++
++        flatten_array, indices = np.unique(
++            np.column_stack(cast(Sequence, self._spin_array)),
++            return_inverse=True,
++            axis=0,
++        )
++        coeff_list = np.zeros(flatten_array.shape[0], dtype=np.complex128)
++        np.add.at(coeff_list, indices, self._coeffs)
++        is_zero = np.isclose(coeff_list, 0, atol=atol)
++        if np.all(is_zero):
++            return SpinOp(
++                (
++                    np.zeros((3, 1, self.register_length), dtype=np.int8),
++                    np.array([0], dtype=np.complex128),
++                ),
++                spin=self.spin,
++            )
++        non_zero = np.logical_not(is_zero)
++        new_array = (
++            flatten_array[non_zero]
++            .reshape((np.count_nonzero(non_zero), 3, self.register_length))
++            .transpose(1, 0, 2)
++        )
++        new_coeff = coeff_list[non_zero]
++        return SpinOp((new_array, new_coeff), spin=self.spin)
++
++    def to_list(self) -> List[Tuple[str, complex]]:
++        """Getter for the list which represents `self`
++
++        Returns:
++            The list [(label, coeff)]
++        """
++        coeff_list = self._coeffs.tolist()
++        return [(self._generate_label(i), coeff_list[i]) for i in range(len(self))]
++
++    def _generate_label(self, i):
++        """Generates the string description of `self`."""
++        labels_list = []
++        for pos, (n_x, n_y, n_z) in enumerate(self._spin_array[:, i].T):
++            if n_x >= 1:
++                labels_list.append(f"X_{pos}" + (f"^{n_x}" if n_x > 1 else ""))
++            if n_y >= 1:
++                labels_list.append(f"Y_{pos}" + (f"^{n_y}" if n_y > 1 else ""))
++            if n_z >= 1:
++                labels_list.append(f"Z_{pos}" + (f"^{n_z}" if n_z > 1 else ""))
++        if not labels_list:
++            return f"I_{self.register_length - 1}"
++        return " ".join(labels_list)
++
++    @lru_cache(maxsize=128)
++    def to_matrix(self) -> np.ndarray:
++        """Convert to dense matrix.
++
++        Returns:
++            The matrix (numpy.ndarray with dtype=numpy.complex128)
++        """
++        # TODO: use scipy.sparse.csr_matrix() and add parameter `sparse: bool`.
++        x_mat = np.fromfunction(
++            lambda i, j: np.where(
++                np.abs(i - j) == 1,
++                np.sqrt((self._dim + 1) * (i + j + 1) / 2 - (i + 1) * (j + 1)) / 2,
++                0,
++            ),
++            (self._dim, self._dim),
++            dtype=np.complex128,
++        )
++        y_mat = np.fromfunction(
++            lambda i, j: np.where(
++                np.abs(i - j) == 1,
++                1j * (i - j) * np.sqrt((self._dim + 1) * (i + j + 1) / 2 - (i + 1) * (j + 1)) / 2,
++                0,
++            ),
++            (self._dim, self._dim),
++            dtype=np.complex128,
++        )
++        z_mat = np.fromfunction(
++            lambda i, j: np.where(i == j, (self._dim - 2 * i - 1) / 2, 0),
++            (self._dim, self._dim),
++            dtype=np.complex128,
++        )
++
++        tensorall = partial(reduce, np.kron)
++
++        mat = sum(
++            self._coeffs[i]
++            * tensorall(
++                np.linalg.matrix_power(x_mat, x)
++                @ np.linalg.matrix_power(y_mat, y)
++                @ np.linalg.matrix_power(z_mat, z)
++                for x, y, z in self._spin_array[:, i].T
++            )
++            for i in range(len(self))
++        )
++        mat = cast(np.ndarray, mat)
++        mat.flags.writeable = False
++        return mat.view()
++
++    def _from_sparse_label(self, labels):
++        xyz_dict = {"X": 0, "Y": 1, "Z": 2}
++
++        # 3-dimensional ndarray (XYZ, terms, register)
++        self._spin_array = np.zeros((3, len(labels), self.register_length), dtype=np.uint8)
++        for term, label in enumerate(labels):
++            for split_label in label.split():
++                xyz, nums = split_label.split("_", 1)
++
++                if xyz not in xyz_dict:
++                    continue
++
++                xyz_num = xyz_dict[xyz]
++                index, power = map(int, nums.split("^", 1)) if "^" in nums else (int(nums), 1)
++                if index >= self.register_length:
++                    raise ValueError(
++                        f"Index {index} must be smaller than register_length {self.register_length}"
++                    )
++                # Check the order of X, Y, and Z whether it has been already assigned.
++                if self._spin_array[range(xyz_num + 1, 3), term, index].any():
++                    raise ValueError(f"Label must be in XYZ order, but {label}.")
++                # same index is not assigned.
++                if self._spin_array[xyz_num, term, index]:
++                    raise ValueError(f"Duplicate index label {index} is given.")
++
++                self._spin_array[xyz_num, term, index] = power
++
++    @staticmethod
++    def _flatten_ladder_ops(data):
++        """Convert `+` to `X + 1j Y` and `-` to `X - 1j Y` with the distributive law"""
++        new_data = []
++        for label, coeff in data:
++            plus_indices = [i for i, char in enumerate(label) if char == "+"]
++            minus_indices = [i for i, char in enumerate(label) if char == "-"]
++            len_plus = len(plus_indices)
++            len_minus = len(minus_indices)
++            pm_indices = plus_indices + minus_indices
++            label_list = list(label)
++            for indices in product(["X", "Y"], repeat=len_plus + len_minus):
++                for i, index in enumerate(indices):
++                    label_list[pm_indices[i]] = index
++                # The phase is determined by the number of Y in + and - respectively. For example,
++                # S_+ otimes S_- = (X + i Y) otimes (X - i Y)
++                # = i^{0-0} XX + i^{1-0} YX + i^{0-1} XY + i^{1-1} YY
++                # = XX + i YX - i XY + YY
++                phase = indices[:len_plus].count("Y") - indices[len_plus:].count("Y")
++                new_data.append(("".join(label_list), coeff * 1j**phase))
++
++        return new_data
++
++    @staticmethod
++    def _flatten_raising_lowering_ops(data, register_length):
++        """Convert +_i -_i to X_i^2 + Y_i^2 + Z_i"""
++        new_data = []
++        for label, coeff in data:
++            positions = []
++            indices = []
++            label_list = label.split()
++            for i in range(register_length):
++                if f"+_{i}" in label_list and f"-_{i}" in label_list:
++                    plus_pos = label_list.index(f"+_{i}")
++                    minus_pos = label_list.index(f"-_{i}")
++                    if minus_pos - plus_pos == 1:
++                        positions.append(plus_pos)
++                        indices.append(i)
++            for ops in product(*([f"X_{i}^2", f"Y_{i}^2", f"Z_{i}"] for i in indices)):
++                label_list = label.split()
++                for pos, op in zip(positions, ops):
++                    label_list[pos] = op
++                for pos in sorted(positions, reverse=True):
++                    label_list.pop(pos + 1)
++                new_data.append((" ".join(label_list), coeff))
++        return new_data
+diff --git a/qiskit_nature/operators/vibrational_op.py b/qiskit_nature/operators/vibrational_op.py
+new file mode 100644
+index 00000000..3dca98a9
+--- /dev/null
++++ b/qiskit_nature/operators/vibrational_op.py
+@@ -0,0 +1,582 @@
++# This code is part of Qiskit.
++#
++# (C) Copyright IBM 2021, 2022.
++#
++# This code is licensed under the Apache License, Version 2.0. You may
++# obtain a copy of this license in the LICENSE.txt file in the root directory
++# of this source tree or at http://www.apache.org/licenses/LICENSE-2.0.
++#
++# Any modifications or derivative works of this code must retain this
++# copyright notice, and modified files need to carry a notice indicating
++# that they have been altered from the originals.
++"""A Vibration operator."""
++
++import itertools
++import logging
++import operator
++import re
++from functools import reduce
++from typing import List, Optional, Tuple, Union
++
++import numpy as np
++from qiskit_nature import QiskitNatureError
++
++from .second_quantized_op import SecondQuantizedOp
++
++logger = logging.getLogger(__name__)
++
++
++class VibrationalOp(SecondQuantizedOp):
++    """Vibration type operators.
++
++    **Label**
++
++    This class supports two kinds of labels: sparse and dense ones.
++
++    1. Sparse Labels:
++
++    Allowed characters for primitives of labels are `+` and `-`.
++
++    .. list-table::
++        :header-rows: 1
++
++        * - Label
++          - Mathematical Representation
++          - Meaning
++        * - `+`
++          - :math:`S_+`
++          - Raising operator
++        * - `-`
++          - :math:`S_-`
++          - Lowering operator
++
++    This class accepts the notation that encodes raising (`+`) and lowering (`-`)
++    operators together with indices of modes and modals that they act on, e.g.
++    `+_{mode_index}*{modal_index}`. Each modal can be excited at most once.
++
++    For more information on how the sparse label notation works, please refer to the more extensive
++    examples in the :class:`SpinOp` class.
++
++    2. Dense Labels:
++
++    Internally, this class is stored as a dense label in an identical notation to that
++    of the :class:`FermionicOp`. Thus, each modal is mapped onto a position of the string and can be
++    one of the following characters: `I`, `+`, `-`, `N` and `E`. Here, `N` and `E` are shorthand
++    for `+-` and `-+` applied on the same modal, respectively.
++    The length of a dense label is given by `register_length` and can be computed as the sum of all
++    modals over all modes.
++
++    For more information on how the dense label notation works, please refer to the more extensive
++    examples in the :class:`FermionicOp` class.
++
++    **Initialization**
++
++    This class can be initialized by the list of tuples that each contains a string with a label as
++    explained above and a corresponding coefficient. This argument must be accompanied by the number
++    of modes and modals, and possibly, the value of a spin.
++
++    **Algebra**
++
++    This class supports the following basic arithmetic operations: addition, subtraction, scalar
++    multiplication, and dagger(adjoint).
++    """
++
++    # a valid pattern consists of a single "+" or "-" operator followed by "_" and a mode index
++    # followed by "*" and a modal index, possibly appearing multiple times and separated by a space
++    _VALID_VIBR_LABEL_PATTERN = re.compile(r"^([\+\-]_\d+\*\d+\s)*[\+\-]_\d+\*\d+(?!\s)$|^[\+\-]+$")
++
++    def __init__(
++        self,
++        data: Union[str, Tuple[str, complex], List[Tuple[str, complex]]],
++        num_modes: int,
++        num_modals: Union[int, List[int]],
++    ):
++        r"""
++        Args:
++            data: list of labels and coefficients.
++            num_modes : number of modes.
++            num_modals: number of modals - described by a list of integers where each integer
++                        describes the number of modals in a corresponding mode; in case of the
++                        same number of modals in each mode it is enough to provide an integer
++                        that describes the number of them; the total number of modals defines a
++                        `register_length`
++        Raises:
++            TypeError: given data has invalid type.
++            ValueError: invalid labels.
++        """
++        if not isinstance(data, (tuple, list, str)):
++            raise TypeError(f"Type of data must be str, tuple, or list, not {type(data)}.")
++
++        if isinstance(data, tuple):
++            if not isinstance(data[0], str) or not isinstance(data[1], (int, float, complex)):
++                raise TypeError(
++                    f"Data tuple must be (str, number), not ({type(data[0])}, {type(data[1])})."
++                )
++            data = [data]
++
++        if isinstance(data, str):
++            data = [(data, 1)]
++
++        if not all(
++            isinstance(label, str) and isinstance(coeff, (int, float, complex))
++            for label, coeff in data
++        ):
++            raise TypeError("Data list must be [(str, number)].")
++
++        self._coeffs: np.ndarray
++        self._labels: List[str]
++
++        if isinstance(num_modals, int):
++            num_modals = [num_modals] * num_modes
++
++        self._num_modes = num_modes
++        self._num_modals = num_modals
++        self._register_length = sum(self._num_modals)
++
++        labels, coeffs = zip(*data)
++        self._coeffs = np.array(coeffs, np.complex128)
++
++        if not any("_" in label for label in labels):
++            # Dense label
++            if not all(len(label) == self._register_length for label in labels):
++                raise ValueError("Lengths of strings of label are different.")
++            label_pattern = re.compile(r"^[I\+\-NE]+$")
++            invalid_labels = [label for label in labels if not label_pattern.match(label)]
++            if invalid_labels:
++                raise ValueError(f"Invalid labels for dense labels are given: {invalid_labels}")
++            self._labels = list(labels)
++        else:
++            # Sparse label
++            dense_labels = self._convert_to_dense_labels(data, num_modals)
++
++            ops: List["VibrationalOp"] = []
++            for dense_label, coeff in dense_labels:
++                new_op = reduce(
++                    lambda a, b: a @ b,
++                    (VibrationalOp((label, 1), num_modes, num_modals) for label in dense_label),
++                )
++                # We ignore the type here because mypy only sees the complex coefficient
++                ops.append(coeff * new_op)  # type: ignore
++
++            op = reduce(lambda a, b: a + b, ops)
++
++            self._labels = op._labels.copy()
++
++    def __repr__(self) -> str:
++        if len(self) == 1:
++            if self._coeffs[0] == 1:
++                return f"VibrationalOp('{self._labels[0]}')"
++            return f"VibrationalOp({self.to_list()[0]})"
++        return f"VibrationalOp({self.to_list()})"  # TODO truncate
++
++    def __str__(self) -> str:
++        """Sets the representation of `self` in the console."""
++        if len(self) == 1:
++            label, coeff = self.to_list()[0]
++            return f"{label} * {coeff}"
++        return "  " + "\n+ ".join([f"{label} * {coeff}" for label, coeff in self.to_list()])
++
++    def __len__(self):
++        return len(self._labels)
++
++    @property
++    def num_modes(self) -> int:
++        """The number of modes.
++        Returns:
++            The number of modes
++        """
++        return self._num_modes
++
++    @property
++    def num_modals(self) -> List[int]:
++        """The number of modals.
++        Returns:
++            The number of modals
++        """
++        return self._num_modals
++
++    @property
++    def register_length(self) -> int:
++        """Gets the register length."""
++        return self._register_length
++
++    def mul(self, other: complex) -> "VibrationalOp":
++        if not isinstance(other, (int, float, complex)):
++            raise TypeError(
++                f"Unsupported operand type(s) for *: 'VibrationalOp' and '{type(other).__name__}'"
++            )
++        return VibrationalOp(
++            list(zip(self._labels, (other * self._coeffs).tolist())),
++            self._num_modes,
++            self._num_modals,
++        )
++
++    def add(self, other: "VibrationalOp") -> "VibrationalOp":
++        if not isinstance(other, VibrationalOp):
++            raise TypeError(
++                f"Unsupported operand type(s) for +: 'VibrationalOp' and '{type(other).__name__}'"
++            )
++
++        # Check compatibility
++        if self.num_modes != other.num_modes or self.num_modals != other.num_modals:
++            raise TypeError("Incompatible register lengths for '+'.")
++
++        return VibrationalOp(
++            list(
++                zip(
++                    self._labels + other._labels,
++                    np.hstack((self._coeffs, other._coeffs)).tolist(),
++                )
++            ),
++            self._num_modes,
++            self._num_modals,
++        )
++
++    def to_list(self) -> List[Tuple[str, complex]]:
++        """Returns the operators internal contents in list-format.
++
++        Returns:
++            A list of tuples consisting of the dense label and corresponding coefficient.
++        """
++        return list(zip(self._labels, self._coeffs.tolist()))
++
++    def adjoint(self) -> "VibrationalOp":
++        dagger_map = {"+": "-", "-": "+", "I": "I"}
++        label_list = []
++        coeff_list = []
++        for label, coeff in zip(self._labels, self._coeffs.tolist()):
++            conjugated_coeff = coeff.conjugate()
++
++            daggered_label = []
++            for char in label:
++                daggered_label.append(dagger_map[char])
++                if char in "+-":
++                    conjugated_coeff *= -1
++
++            label_list.append("".join(daggered_label))
++            coeff_list.append(conjugated_coeff)
++
++        return VibrationalOp(
++            list(zip(label_list, np.array(coeff_list, dtype=np.complex128))),
++            self._num_modes,
++            self._num_modals,
++        )
++
++    def simplify(self, atol: Optional[float] = None) -> "VibrationalOp":
++        if atol is None:
++            atol = self.atol
++
++        label_list, indices = np.unique(self._labels, return_inverse=True, axis=0)
++        coeff_list = np.zeros(label_list.shape[0], dtype=np.complex128)
++        np.add.at(coeff_list, indices, self._coeffs)
++        is_zero = np.isclose(coeff_list, 0, atol=atol)
++        if np.all(is_zero):
++            return VibrationalOp.zero(self._num_modes, self._num_modals)
++        non_zero = np.logical_not(is_zero)
++        return VibrationalOp(
++            list(zip(label_list[non_zero], coeff_list[non_zero])),
++            self._num_modes,
++            self._num_modals,
++        )
++
++    def compose(self, other: "VibrationalOp") -> "VibrationalOp":
++        if isinstance(other, VibrationalOp):
++            # Initialize new operator_list for the returned Vibration operator
++            new_data = []
++
++            # Compute the product (Vibration type operators consist of a sum of VibrationalOp):
++            # F1 * F2 = (B1 + B2 + ...) * (C1 + C2 + ...) where Bi and Ci are VibrationalOp labels
++            for label1, cf1 in self.to_list():
++                for label2, cf2 in other.to_list():
++                    new_label, not_empty = self._single_mul(label1, label2)
++                    if not not_empty:
++                        # empty operator
++                        continue
++                    new_data.append((new_label, cf1 * cf2))
++
++            if not new_data:
++                return VibrationalOp(("I_0*0", 0), self._num_modes, self._num_modals)
++
++            return VibrationalOp(new_data, self._num_modes, self._num_modals)
++
++        raise TypeError(
++            f"Unsupported operand type(s) for *: 'VibrationalOp' and '{type(other).__name__}'"
++        )
++
++    # Map the products of two operators on a single vibrational mode to their result.
++    _MAPPING = {
++        # 0                   - if product vanishes,
++        # new label           - if product does not vanish
++        ("I", "I"): "I",
++        ("I", "+"): "+",
++        ("I", "-"): "-",
++        ("I", "N"): "N",
++        ("I", "E"): "E",
++        ("+", "I"): "+",
++        ("+", "+"): "0",
++        ("+", "-"): "N",
++        ("+", "N"): "0",
++        ("+", "E"): "+",
++        ("-", "I"): "-",
++        ("-", "+"): "E",
++        ("-", "-"): "0",
++        ("-", "N"): "-",
++        ("-", "E"): "0",
++        ("N", "I"): "N",
++        ("N", "+"): "+",
++        ("N", "-"): "0",
++        ("N", "N"): "N",
++        ("N", "E"): "0",
++        ("E", "I"): "E",
++        ("E", "+"): "0",
++        ("E", "-"): "-",
++        ("E", "N"): "0",
++        ("E", "E"): "E",
++    }
++
++    @classmethod
++    def _single_mul(cls, label1: str, label2: str) -> Tuple[str, bool]:
++        if len(label1) != len(label2):
++            raise QiskitNatureError("Operators act on Fermion Registers of different length")
++
++        new_label = []
++
++        for pair in zip(label1, label2):
++            new_char = cls._MAPPING[pair]
++            if new_char == "0":
++                # if the new symbol is a zero-op, return early
++                return "I" * len(label1), False
++            new_label.append(new_char)
++            # NOTE: we can ignore the type because the only scenario where an `int` occurs is caught
++            # by the `if`-statement above.
++
++        return "".join(new_label), True
++
++    def _validate_vibrational_labels(
++        self, vibrational_labels: List[Tuple[str, complex]], num_modals: List[int]
++    ):
++        """Validates vibrational labels in the following aspects:
++        - vibrational labels stored in a correct data structure,
++        - labels for each coefficient conform with a regular expression,
++        - indices of operators in each label are correct and ordered correctly:
++            * indices for modes and modals do not exceed declared ranges,
++            * there are no duplicated operators for each coefficient,
++            * operators in each label are sorted in the decreasing order of modes and modals,
++            if both are equal then '+' comes before '-' (i.e. they are normal ordered),
++            * Finally, a warning will be logged if the number of particles is not preserved
++            within each mode. This corresponds to a mismatching number of `+` and `-` operators.
++            This case only leads to a warning because it allows re-use of the
++            :class:`VibrationalOp` for state initialization, where only `+` operators are
++            present.
++
++        Args:
++            vibrational_labels: list of vibrational labels with coefficients.
++            num_modals: the number of modals.
++
++        Raises:
++            ValueError: if invalid vibrational labels provided.
++        """
++        if not isinstance(vibrational_labels, list):
++            raise ValueError("Invalid data type.")
++
++        invalid_labels = [
++            label
++            for label, _ in vibrational_labels
++            if not self._VALID_VIBR_LABEL_PATTERN.match(label)
++        ]
++        if invalid_labels:
++            raise ValueError(f"Invalid labels: {invalid_labels}")
++
++        self._validate_indices(vibrational_labels, num_modals)
++
++    def _validate_indices(
++        self, vibrational_labels: List[Tuple[str, complex]], num_modals: List[int]
++    ):
++        for labels, _ in vibrational_labels:
++            coeff_labels_split = labels.split()
++            num_modes = len(num_modals)
++            par_num_mode_conserved_check = [0] * num_modes
++            prev_op, prev_mode_index, prev_modal_index = "+", -1, -1
++            for label in coeff_labels_split:
++                op, mode_index_str, modal_index_str = re.split("[*_]", label)
++                mode_index = int(mode_index_str)
++                modal_index = int(modal_index_str)
++                if self._is_index_out_of_range(mode_index, num_modes, modal_index, num_modals):
++                    raise ValueError(f"Indices out of the declared range for label {label}.")
++                if self._is_label_duplicated(
++                    mode_index,
++                    prev_mode_index,
++                    modal_index,
++                    prev_modal_index,
++                    op,
++                    prev_op,
++                ):
++                    raise ValueError(f"Operators in a label duplicated for label {label}.")
++                if self._is_order_incorrect(
++                    mode_index,
++                    prev_mode_index,
++                    modal_index,
++                    prev_modal_index,
++                    op,
++                    prev_op,
++                ):
++                    raise ValueError(
++                        f"Incorrect order of operators for label {label} and previous label "
++                        f"{str(prev_op)}_{str(prev_mode_index)}*{str(prev_modal_index)}."
++                    )
++
++                prev_op, prev_mode_index, prev_modal_index = op, mode_index, modal_index
++
++                par_num_mode_conserved_check[int(mode_index)] += 1 if op == "+" else -1
++            for index, item in enumerate(par_num_mode_conserved_check):
++                if item != 0:
++                    logger.warning(
++                        "Number of raising and lowering operators do not agree for mode %s in "
++                        "label %s.",
++                        index,
++                        labels,
++                    )
++
++    def _is_index_out_of_range(
++        self, mode_index: int, num_modes: int, modal_index: int, num_modals: List[int]
++    ) -> bool:
++        return mode_index >= num_modes or modal_index >= num_modals[int(mode_index)]
++
++    def _is_label_duplicated(
++        self,
++        mode_index: int,
++        prev_mode_index: int,
++        modal_index: int,
++        prev_modal_index: int,
++        op: str,
++        prev_op: str,
++    ) -> bool:
++        return modal_index == prev_modal_index and mode_index == prev_mode_index and op == prev_op
++
++    def _is_order_incorrect(
++        self,
++        mode_index: int,
++        prev_mode_index: int,
++        modal_index: int,
++        prev_modal_index: int,
++        op: str,
++        prev_op: str,
++    ) -> bool:
++        return (
++            self._is_mode_order_incorrect(mode_index, prev_mode_index)
++            or self._is_modal_order_incorrect(
++                prev_mode_index, mode_index, prev_modal_index, modal_index
++            )
++            or self._is_operator_order_incorrect(
++                mode_index, prev_mode_index, modal_index, prev_modal_index, op, prev_op
++            )
++        )
++
++    def _is_mode_order_incorrect(self, mode_index: int, prev_mode_index: int) -> bool:
++        return mode_index < prev_mode_index
++
++    def _is_modal_order_incorrect(
++        self,
++        prev_mode_index: int,
++        mode_index: int,
++        prev_modal_index: int,
++        modal_index: int,
++    ) -> bool:
++        return mode_index == prev_mode_index and modal_index < prev_modal_index
++
++    def _is_operator_order_incorrect(
++        self,
++        mode_index: int,
++        prev_mode_index: int,
++        modal_index: int,
++        prev_modal_index: int,
++        op: str,
++        prev_op: str,
++    ) -> bool:
++        return (
++            mode_index == prev_mode_index
++            and modal_index == prev_modal_index
++            and prev_op == "-"
++            and op == "+"
++        )
++
++    def _convert_to_dense_labels(
++        self, vibrational_labels: List[Tuple[str, complex]], num_modals: List[int]
++    ) -> List[Tuple[List[str], complex]]:
++        """Converts sparse :class:`VibrationalOp` labels to dense ones.
++        The dense labels match the notation of :class:`FermionicOp`.
++
++        Args:
++            vibrational_labels: list of labels and corresponding coefficients that describe a
++            vibrational problem.
++            num_modals: number of modals in each mode.
++        Returns:
++            The converted list of dense labels.
++        Raises:
++            ValueError: if invalid labels provided or the length of list of modal sizes do not agree
++            with the number of modes provided
++        """
++        self._validate_vibrational_labels(vibrational_labels, num_modals)
++
++        partial_sum_modals = [0] + list(itertools.accumulate(num_modals, operator.add))
++
++        dense_labels = []
++        for labels, coeff in vibrational_labels:
++            coeff_new_labels = self._build_coeff_dense_labels(labels, partial_sum_modals)
++            dense_labels.append((coeff_new_labels, coeff))
++        return dense_labels
++
++    def _build_coeff_dense_labels(self, labels: str, partial_sum_modals: List[int]) -> List[str]:
++        coeff_labels_split = labels.split()
++        coeff_new_labels = []
++        for label in coeff_labels_split:
++            op, index = self._build_dense_label(label, partial_sum_modals)
++            new_label = ["I"] * partial_sum_modals[-1]
++            new_label[index] = op
++            coeff_new_labels.append("".join(new_label))
++        return coeff_new_labels
++
++    def _build_dense_label(self, label: str, partial_sum_modals: List[int]) -> Tuple[str, int]:
++        op, mode_index, modal_index = re.split("[*_]", label)
++        index = partial_sum_modals[int(mode_index)] + int(modal_index)
++        return (op, index)
++
++    @classmethod
++    def zero(cls, num_modes: int, num_modals: Union[int, List[int]]) -> "VibrationalOp":
++        """Constructs a zero-operator.
++
++        Args:
++            num_modes : number of modes.
++            num_modals: number of modals - described by a list of integers where each integer
++                        describes the number of modals in a corresponding mode; in case of the
++                        same number of modals in each mode it is enough to provide an integer
++                        that describes the number of them; the total number of modals defines a
++                        `register_length`
++
++        Returns:
++            The zero-operator of the given length.
++        """
++        if isinstance(num_modals, int):
++            num_modals = [num_modals] * num_modes
++
++        return VibrationalOp(("I" * sum(num_modals), 0.0), num_modes, num_modals)
++
++    @classmethod
++    def one(cls, num_modes: int, num_modals: Union[int, List[int]]) -> "VibrationalOp":
++        """Constructs a unity-operator.
++
++        Args:
++            num_modes : number of modes.
++            num_modals: number of modals - described by a list of integers where each integer
++                        describes the number of modals in a corresponding mode; in case of the
++                        same number of modals in each mode it is enough to provide an integer
++                        that describes the number of them; the total number of modals defines a
++                        `register_length`
++
++        Returns:
++            The unity-operator of the given length.
++        """
++        if isinstance(num_modals, int):
++            num_modals = [num_modals] * num_modes
++
++        return VibrationalOp(("I" * sum(num_modals), 1.0), num_modes, num_modals)

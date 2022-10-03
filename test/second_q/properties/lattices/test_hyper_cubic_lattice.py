@@ -21,6 +21,10 @@ from qiskit_nature.second_q.properties.lattices import (
 )
 
 
+from ddt import ddt, data, unpack
+
+
+@ddt
 class TestHyperCubic(QiskitNatureTestCase):
     """Test HyperCubicLattice."""
 
@@ -112,3 +116,57 @@ class TestHyperCubic(QiskitNatureTestCase):
             )
 
             assert_array_equal(hyper_cubic.to_adjacency_matrix(weighted=True), target_matrix)
+
+    @unpack
+    @data(
+        ((2, 2), BoundaryCondition.OPEN, {(0, 3, 2, 1)}),
+        ((2, 2), BoundaryCondition.PERIODIC, {(0, 3, 2, 1)}),
+        (
+            (3, 3),
+            BoundaryCondition.OPEN,
+            {(2, 8, 4, 3), (0, 6, 2, 1), (7, 11, 9, 8), (5, 10, 7, 6)},
+        ),
+        (
+            (3, 3),
+            BoundaryCondition.PERIODIC,
+            {
+                (2, 8, 4, 3),
+                (7, 11, 9, 8),
+                (0, 6, 2, 1),
+                (5, 17, 9, 16),
+                (12, 10, 13, 1),
+                (13, 11, 14, 3),
+                (0, 16, 4, 15),
+                (12, 17, 14, 15),
+                (5, 10, 7, 6),
+            },
+        ),
+        (
+            (2, 2, 2),
+            BoundaryCondition.OPEN,
+            {
+                (1, 6, 4, 2),
+                (5, 11, 7, 6),
+                (8, 11, 10, 9),
+                (0, 8, 5, 1),
+                (3, 10, 7, 4),
+                (0, 9, 3, 2),
+            },
+        ),
+    )
+    def test_plaquettes(self, size, boundary, expected_result):
+        lattice = HyperCubicLattice(size=size, self_loops=False, boundary_condition=boundary)
+        np.testing.assert_equal(expected_result, lattice.get_plaquettes())
+
+    @unpack
+    @data(
+        ((10, 10), BoundaryCondition.OPEN, 9 * 9),
+        ((7, 6, 4), BoundaryCondition.OPEN, 6 * 5 * 4 + 6 * 6 * 3 + 7 * 5 * 3),
+        ((2, 2), BoundaryCondition.PERIODIC, 1),
+        ((2, 2, 2), BoundaryCondition.OPEN, 6),
+        ((2, 2, 2), BoundaryCondition.PERIODIC, 6),
+        ((3, 4), [BoundaryCondition.OPEN, BoundaryCondition.PERIODIC], 2 * 3 + 2),
+    )
+    def test_complex_plaquettes(self, size, boundary, expected_n_plaquettes):
+        lattice = HyperCubicLattice(size=size, self_loops=False, boundary_condition=boundary)
+        self.assertEqual(expected_n_plaquettes, len(lattice.get_plaquettes()))
